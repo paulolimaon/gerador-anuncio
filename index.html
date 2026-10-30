@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gerador de anúncios</title>
+<style>
+  :root { --bg:#f3f1ec; --card:#fff; --ink:#1d2320; --mut:#66706a; --line:#dcd8cf; --zap:#128c4a; --bolha:#dcf6c8; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width:1020px; margin:0 auto; padding:28px 18px 60px; display:grid; gap:24px; grid-template-columns:1fr 1fr; align-items:start; }
+  h1 { grid-column:1/-1; margin:0; font-size:1.5rem; }
+  h1 small { display:block; font-weight:400; color:var(--mut); font-size:.95rem; margin-top:2px; }
+  .painel { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:18px; }
+  label { display:block; font-size:.88rem; color:var(--mut); margin:12px 0 4px; }
+  input[type=text], textarea { width:100%; padding:10px 11px; border:1px solid var(--line); border-radius:7px; font:inherit; background:#fff; }
+  input:focus, textarea:focus, button:focus-visible, a.btn:focus-visible { outline:2px solid var(--zap); outline-offset:1px; }
+  .linha { display:flex; gap:10px; } .linha > * { flex:1; }
+  button { font:inherit; cursor:pointer; border:1px solid var(--zap); background:var(--zap); color:#fff; padding:10px 14px; border-radius:7px; }
+  button.sec, a.btn { background:#fff; color:var(--zap); }
+  a.btn { display:inline-block; font:inherit; border:1px solid var(--zap); text-decoration:none; padding:10px 14px; border-radius:7px; cursor:pointer; }
+  .busca { display:flex; gap:10px; } .busca input { flex:1; } .busca button { flex:none; }
+  #status { min-height:1.4em; margin:10px 0 0; font-size:.9rem; color:var(--mut); }
+  #status.erro { color:#b3261e; } #status.aviso { color:#8a5a00; }
+  .bolha { background:var(--bolha); border-radius:10px 10px 10px 2px; padding:6px; max-width:380px; box-shadow:0 1px 1px rgba(0,0,0,.12); }
+  .bolha img { display:block; width:100%; border-radius:6px; background:#e9e6df; min-height:140px; object-fit:cover; }
+  .bolha pre { margin:0; padding:8px 6px 6px; white-space:pre-wrap; word-break:break-word; font:inherit; font-size:.95rem; }
+  .vazio { color:var(--mut); padding:30px 10px; text-align:center; }
+  .acoes { display:flex; flex-wrap:wrap; gap:10px; margin-top:16px; }
+  textarea { min-height:150px; resize:vertical; }
+  @media (max-width:760px) { main { grid-template-columns:1fr; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>Gerador de anúncios <small>Cole o link de afiliado (Shopee ou Mercado Livre) e copie o anúncio pronto.</small></h1>
+
+  <section class="painel">
+    <div class="busca">
+      <input type="text" id="url" placeholder="Cole o link de afiliado aqui" autofocus>
+      <button id="buscar">Buscar</button>
+    </div>
+    <p id="status"></p>
+
+    <label for="titulo">Nome do produto</label>
+    <input type="text" id="titulo">
+    <div class="linha">
+      <div><label for="preco">Preço atual (R$)</label><input type="text" id="preco" inputmode="decimal"></div>
+      <div><label for="antigo">Preço antigo (R$)</label><input type="text" id="antigo" inputmode="decimal"></div>
+    </div>
+    <label for="cupom">Cupom (opcional)</label>
+    <input type="text" id="cupom">
+    <label for="imagem">Imagem (URL)</label>
+    <input type="text" id="imagem">
+    <label for="texto">Texto do anúncio (editável)</label>
+    <textarea id="texto"></textarea>
+  </section>
+
+  <section class="painel">
+    <div id="previa"><p class="vazio">A prévia do anúncio aparece aqui.</p></div>
+    <div class="acoes">
+      <button id="copiarTexto">Copiar texto</button>
+      <button id="copiarImg" class="sec">Copiar imagem</button>
+      <a id="baixar" class="btn" role="button" tabindex="0">Baixar imagem</a>
+    </div>
+  </section>
+</main>
+
+<script>
+/* ===== CONFIGURAÇÃO ===== */
+
+/* Modelo do anúncio. Linhas com campo vazio somem sozinhas. */
+const LINHAS = [
+  '🔥 {titulo}',
+  '',
+  '{preco}',
+  '🎟️ Cupom: {cupom}',
+  '',
+  '👉 {link}',
+];
+
+/* Se você publicar o worker.js no Cloudflare, cole a URL dele aqui
+   (ex.: 'https://meu-proxy.seuusuario.workers.dev/'). Fica mais confiável. */
+const WORKER_URL = '';
+
+/* Proxy público gratuito, usado enquanto WORKER_URL estiver vazio (pode falhar ou ser bloqueado). */
+const PROXY_PUBLICO = 'https://api.allorigins.win/raw?url=';
+
+/* Proxy de imagens com CORS liberado (necessário para copiar/baixar a imagem). */
+const IMG_PROXY = u => 'https://images.weserv.nl/?output=png&url=' + encodeURIComponent(u);
+
+/* ===== CÓDIGO ===== */
+const $ = s => document.querySelector(s);
+const campos = ['titulo','preco','antigo','cupom','imagem'];
+let linkAfiliado = '';
+let textoEditadoNaMao = false;
+
+const parsePreco = s => {
+  s = String(s ?? '').replace(/[^\d,.]/g,'');
+  if (!s) return null;
+  if (s.includes(',')) s = s.replace(/\./g,'').replace(',','.');
+  const n = parseFloat(s); return isNaN(n) ? null : n;
+};
+const brl = n => n.toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
+const paraCampo = n => n == null ? '' : n.toFixed(2).replace('.',',');
+
+function montarPreco() {
+  const p = parsePreco($('#preco').value), a = parsePreco($('#antigo').value);
+  if (p == null) return '';
+  if (a != null && a > p) return `De ~${brl(a)}~ por *${brl(p)}* (${Math.round((1 - p/a) * 100)}% OFF)`;
+  return `Por *${brl(p)}*`;
+}
+
+function montarTexto() {
+  const v = { titulo:$('#titulo').value.trim(), preco:montarPreco(), cupom:$('#cupom').value.trim(), link:linkAfiliado };
+  const out = [];
+  for (const l of LINHAS) {
+    const ks = [...l.matchAll(/\{(\w+)\}/g)].map(m => m[1]);
+    if (ks.some(k => !v[k])) continue;
+    out.push(l.replace(/\{(\w+)\}/g, (_, k) => v[k]));
+  }
+  return out.join('\n').replace(/\n{3,}/g,'\n\n').trim();
+}
+
+function atualizar(regerarTexto = true) {
+  if (regerarTexto && !textoEditadoNaMao) $('#texto').value = montarTexto();
+  const img = $('#imagem').value.trim();
+  $('#previa').innerHTML = (linkAfiliado || $('#titulo').value)
+    ? `<div class="bolha">${img ? '<img alt="">' : ''}<pre></pre></div>`
+    : '<p class="vazio">A prévia do anúncio aparece aqui.</p>';
+  const im = $('#previa img'); if (im) im.src = IMG_PROXY(img);
+  const pre = $('#previa pre'); if (pre) pre.textContent = $('#texto').value;
+}
+
+function status(msg, tipo = '') { const s = $('#status'); s.textContent = msg; s.className = tipo; }
+
+/* --- leitura da página --- */
+function achaProduto(no) {
+  if (!no || typeof no !== 'object') return null;
+  const t = no['@type'];
+  if (t === 'Product' || (Array.isArray(t) && t.includes('Product'))) return no;
+  for (const k of Object.keys(no)) { const r = achaProduto(no[k]); if (r) return r; }
+  return null;
+}
+const numero = v => {
+  if (v == null || v === '') return null;
+  if (typeof v === 'number') return v;
+  return parsePreco(v);
+};
+const limpaTitulo = t => t.replace(/\s*[|\-–—]\s*(Shopee Brasil|Shopee|Mercado\s?Livre).*$/i,'').replace(/[\u{1F4E6}\u{1F6D2}\s]+$/u,'').trim();
+
+function lerPagina(html, base) {
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  const meta = k => (doc.querySelector(`meta[property="${k}"],meta[name="${k}"],meta[itemprop="${k}"]`) || {}).content || '';
+
+  let ld = null;
+  for (const s of doc.querySelectorAll('script[type="application/ld+json"]')) {
+    try { ld = achaProduto(JSON.parse(s.textContent)); } catch (e) {}
+    if (ld) break;
+  }
+
+  let titulo = ld?.name || meta('og:title') || meta('twitter:title') || doc.title || '';
+  titulo = limpaTitulo(titulo);
+
+  let img = meta('og:image') || meta('twitter:image') || '';
+  if (!img && ld?.image) {
+    const i = ld.image; img = Array.isArray(i) ? (typeof i[0] === 'string' ? i[0] : i[0]?.url) : (i.url || i);
+  }
+  if (img) { try { img = new URL(img, base).href; } catch (e) {} }
+
+  let preco = null;
+  if (ld?.offers) { const of = Array.isArray(ld.offers) ? ld.offers[0] : ld.offers; preco = numero(of?.price ?? of?.lowPrice); }
+  preco ??= numero(meta('product:price:amount') || meta('og:price:amount') || meta('price'));
+
+  let antigo = null;
+  const m = html.match(/Antes:\s*([\d.]+)\s*reais(?:\s*com\s*(\d+)\s*centavos)?/i);
+  if (m) antigo = parseFloat(m[1].replace(/\./g,'') + '.' + (m[2] || '0').padStart(2,'0'));
+  if (antigo != null && preco != null && antigo <= preco) antigo = null;
+
+  return { titulo, img, preco, antigo };
+}
+
+async function baixarHtml(url) {
+  const alvo = WORKER_URL ? WORKER_URL + '?url=' + encodeURIComponent(url) : PROXY_PUBLICO + encodeURIComponent(url);
+  const r = await fetch(alvo);
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.text();
+}
+
+async function buscar() {
+  const url = $('#url').value.trim();
+  if (!url) return;
+  linkAfiliado = url; textoEditadoNaMao = false;
+  const plataforma = /shopee|shp\.ee/i.test(url) ? 'Shopee' : /mercadoli|meli\.la/i.test(url) ? 'Mercado Livre' : 'Loja';
+  status('Buscando…');
+  try {
+    const html = await baixarHtml(url);
+    const d = lerPagina(html, url);
+    $('#titulo').value = d.titulo; $('#preco').value = paraCampo(d.preco);
+    $('#antigo').value = paraCampo(d.antigo); $('#imagem').value = d.img;
+    const falta = [!d.titulo && 'nome', !d.img && 'imagem', d.preco == null && 'preço'].filter(Boolean);
+    status(falta.length ? `${plataforma}: não achei ${falta.join(', ')}. Preencha à mão.` : `${plataforma}: dados carregados. Confira antes de postar.`, falta.length ? 'aviso' : '');
+  } catch (e) {
+    status(`Não consegui ler o link (${e.message}). Preencha os campos à mão; o link já entra no texto.`, 'erro');
+  }
+  atualizar();
+}
+
+/* --- ações --- */
+async function blobDaImagem() {
+  const img = $('#imagem').value.trim();
+  if (!img) throw new Error('sem imagem');
+  const r = await fetch(IMG_PROXY(img));
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.blob();
+}
+
+campos.forEach(c => $('#' + c).addEventListener('input', () => atualizar()));
+$('#texto').addEventListener('input', () => { textoEditadoNaMao = true; atualizar(false); });
+$('#buscar').addEventListener('click', buscar);
+$('#url').addEventListener('keydown', e => { if (e.key === 'Enter') buscar(); });
+
+$('#copiarTexto').addEventListener('click', async () => {
+  try { await navigator.clipboard.writeText($('#texto').value); status('Texto copiado.'); }
+  catch (e) { status('Não deu para copiar; selecione o texto e use Ctrl+C.', 'erro'); }
+});
+
+$('#copiarImg').addEventListener('click', async () => {
+  try {
+    const blob = await blobDaImagem();
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+    status('Imagem copiada. Cole no WhatsApp com Ctrl+V.');
+  } catch (e) { status('Não deu para copiar a imagem; use "Baixar imagem".', 'erro'); }
+});
+
+async function baixarImagem() {
+  try {
+    const blob = await blobDaImagem();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = 'produto.png';
+    a.click(); URL.revokeObjectURL(a.href);
+  } catch (e) { status('Não deu para baixar a imagem.', 'erro'); }
+}
+$('#baixar').addEventListener('click', baixarImagem);
+$('#baixar').addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); baixarImagem(); } });
+
+atualizar();
+</script>
+</body>
+</html>
